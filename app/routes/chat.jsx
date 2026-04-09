@@ -95,6 +95,7 @@ async function handleChatRequest(request) {
     const conversationId = body.conversation_id || Date.now().toString();
     const promptType = body.prompt_type || AppConfig.api.defaultPromptType;
     const clientApiKey = body.api_key || '';
+    const storeDomain = body.store_domain || '';
 
     // Validate API key
     if (!clientApiKey && !process.env.CLAUDE_API_KEY) {
@@ -112,7 +113,8 @@ async function handleChatRequest(request) {
         conversationId,
         promptType,
         stream,
-        apiKey: clientApiKey || process.env.CLAUDE_API_KEY
+        apiKey: clientApiKey || process.env.CLAUDE_API_KEY,
+        storeDomain
       });
     });
 
@@ -143,16 +145,21 @@ async function handleChatSession({
   conversationId,
   promptType,
   stream,
-  apiKey
+  apiKey,
+  storeDomain
 }) {
   // Initialize services - use merchant's API key
   const claudeService = createClaudeService(apiKey);
   const toolService = createToolService();
 
   // Initialize MCP client
+  // Use storeDomain from theme settings if provided, otherwise fall back to Origin header
   const shopId = request.headers.get("X-Shopify-Shop-Id");
-  const shopDomain = request.headers.get("Origin");
+  const rawStoreDomain = storeDomain || request.headers.get("Origin");
+  const shopDomain = rawStoreDomain?.startsWith('http') ? rawStoreDomain : `https://${rawStoreDomain}`;
   const { mcpApiUrl } = await getCustomerAccountUrls(shopDomain, conversationId);
+
+  console.log(`MCP connecting to store: ${shopDomain} (shopId: ${shopId})`);
 
   const mcpClient = new MCPClient(
     shopDomain,

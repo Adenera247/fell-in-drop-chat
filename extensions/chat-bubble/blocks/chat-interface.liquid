@@ -42,6 +42,7 @@
     nudgeDelay: {{ block.settings.nudge_delay | default: 15 }},
     serverUrl: {{ block.settings.server_url | json }},
     apiKey: {{ block.settings.api_key | json }},
+    storeDomain: {{ block.settings.store_domain | json }},
     userMessageColor: {{ block.settings.user_message_color | json }},
     assistantMessageColor: {{ block.settings.assistant_message_color | json }}
   };
@@ -108,8 +109,13 @@
       "type": "text",
       "id": "api_key",
       "label": "Claude API Key",
-      "default": "",
       "info": "Your Anthropic API key (sk-ant-...). Required for the chat to work."
+    },
+    {
+      "type": "text",
+      "id": "store_domain",
+      "label": "Store Domain",
+      "info": "Your .myshopify.com domain (e.g. my-store.myshopify.com). Required to access your products and policies."
     },
     {
       "type": "text",

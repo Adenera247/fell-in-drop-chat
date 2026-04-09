@@ -529,7 +529,8 @@
             message: userMessage,
             conversation_id: conversationId,
             prompt_type: promptType,
-            api_key: window.shopChatConfig?.apiKey || ''
+            api_key: window.shopChatConfig?.apiKey || '',
+            store_domain: window.shopChatConfig?.storeDomain || ''
           });
 
           const streamUrl = (window.shopChatConfig?.serverUrl || 'https://localhost:3458') + '/chat';
