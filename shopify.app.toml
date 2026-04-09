@@ -1,14 +1,13 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "eeb4054621ebd7434579a475dc82f3f6"
-name = "chat-bot-test"
-application_url = "https://example.com"
+client_id = "56374e85fd6e6eea470f0523c274c13c"
+name = "Claude Chat Bot"
+application_url = "https://srv1574024.hstgr.cloud"
 embedded = true
 handle = "fell-in-drop-chat"
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-04"
