@@ -39,6 +39,10 @@
         // Detect mobile device
         this.isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
+        // Cache nudge elements
+        this.elements.nudge = container.querySelector('#shop-ai-nudge');
+        this.elements.nudgeClose = container.querySelector('#shop-ai-nudge-close');
+
         // Set up event listeners
         this.setupEventListeners();
 
@@ -46,11 +50,44 @@
         if (this.isMobile) {
           this.setupMobileViewport();
         }
+
+        // Start nudge timer
+        this.startNudgeTimer();
       },
 
       /**
        * Set up all event listeners for UI interactions
        */
+      /**
+       * Start the nudge timer to show a message after delay
+       */
+      startNudgeTimer: function() {
+        const delay = (window.shopChatConfig?.nudgeDelay || 15) * 1000;
+        const { nudge, nudgeClose, chatWindow } = this.elements;
+        if (!nudge) return;
+
+        this.nudgeTimeout = setTimeout(() => {
+          // Only show if chat is not already open
+          if (!chatWindow.classList.contains('active')) {
+            nudge.classList.add('visible');
+          }
+        }, delay);
+
+        // Close nudge button
+        if (nudgeClose) {
+          nudgeClose.addEventListener('click', (e) => {
+            e.stopPropagation();
+            nudge.classList.remove('visible');
+          });
+        }
+
+        // Clicking the nudge opens the chat
+        nudge.addEventListener('click', () => {
+          nudge.classList.remove('visible');
+          this.toggleChatWindow();
+        });
+      },
+
       setupEventListeners: function() {
         const { chatBubble, closeButton, chatInput, sendButton, messagesContainer } = this.elements;
 
@@ -117,6 +154,12 @@
         const { chatWindow, chatInput } = this.elements;
 
         chatWindow.classList.toggle('active');
+
+        // Hide nudge when chat opens
+        if (this.elements.nudge) {
+          this.elements.nudge.classList.remove('visible');
+          clearTimeout(this.nudgeTimeout);
+        }
 
         if (chatWindow.classList.contains('active')) {
           // On mobile, prevent body scrolling and delay focus
@@ -264,6 +307,13 @@
       add: function(text, sender, messagesContainer) {
         const messageElement = document.createElement('div');
         messageElement.classList.add('shop-ai-message', sender);
+
+        // Apply custom colors from theme settings
+        if (sender === 'user' && window.shopChatConfig?.userMessageColor) {
+          messageElement.style.backgroundColor = window.shopChatConfig.userMessageColor;
+        } else if (sender === 'assistant' && window.shopChatConfig?.assistantMessageColor) {
+          messageElement.style.backgroundColor = window.shopChatConfig.assistantMessageColor;
+        }
 
         if (sender === 'assistant') {
           messageElement.dataset.rawText = text;
@@ -481,7 +531,7 @@
             prompt_type: promptType
           });
 
-          const streamUrl = 'https://localhost:3458/chat';
+          const streamUrl = (window.shopChatConfig?.serverUrl || 'https://localhost:3458') + '/chat';
           const shopId = window.shopId;
 
           const response = await fetch(streamUrl, {
@@ -503,6 +553,9 @@
           messageElement.classList.add('shop-ai-message', 'assistant');
           messageElement.textContent = '';
           messageElement.dataset.rawText = '';
+          if (window.shopChatConfig?.assistantMessageColor) {
+            messageElement.style.backgroundColor = window.shopChatConfig.assistantMessageColor;
+          }
           messagesContainer.appendChild(messageElement);
           currentMessageElement = messageElement;
 
@@ -554,7 +607,7 @@
           case 'chunk':
             ShopAIChat.UI.removeTypingIndicator();
             currentMessageElement.dataset.rawText += data.chunk;
-            currentMessageElement.textContent = currentMessageElement.dataset.rawText;
+            ShopAIChat.Formatting.formatMessageContent(currentMessageElement);
             ShopAIChat.UI.scrollToBottom();
             break;
 
@@ -590,9 +643,7 @@
             break;
 
           case 'tool_use':
-            if (data.tool_use_message) {
-              ShopAIChat.Message.addToolUse(data.tool_use_message, messagesContainer);
-            }
+            // Hidden from client - tools run silently in the background
             break;
 
           case 'new_message':
@@ -630,7 +681,8 @@
           messagesContainer.appendChild(loadingMessage);
 
           // Fetch history from the server
-          const historyUrl = `https://localhost:3458/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
+          const baseUrl = window.shopChatConfig?.serverUrl || 'https://localhost:3458';
+          const historyUrl = `${baseUrl}/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
           console.log('Fetching history from:', historyUrl);
 
           const response = await fetch(historyUrl, {
@@ -779,7 +831,7 @@
           attemptCount++;
 
           try {
-            const tokenUrl = 'https://localhost:3458/auth/token-status?conversation_id=' +
+            const tokenUrl = (window.shopChatConfig?.serverUrl || 'https://localhost:3458') + '/auth/token-status?conversation_id=' +
               encodeURIComponent(conversationId);
             const response = await fetch(tokenUrl);
 

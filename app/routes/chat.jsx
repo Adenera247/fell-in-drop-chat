@@ -42,6 +42,13 @@ export async function loader({ request }) {
  * React Router action function for handling POST requests
  */
 export async function action({ request }) {
+  // Handle OPTIONS requests (CORS preflight)
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: getCorsHeaders(request)
+    });
+  }
   return handleChatRequest(request);
 }
 
@@ -72,6 +79,14 @@ async function handleChatRequest(request) {
     if (!userMessage) {
       return new Response(
         JSON.stringify({ error: AppConfig.errorMessages.missingMessage }),
+        { status: 400, headers: getSseHeaders(request) }
+      );
+    }
+
+    // Validate message length (prevent abuse)
+    if (typeof userMessage !== 'string' || userMessage.length > 2000) {
+      return new Response(
+        JSON.stringify({ error: "Message too long. Maximum 2000 characters." }),
         { status: 400, headers: getSseHeaders(request) }
       );
     }

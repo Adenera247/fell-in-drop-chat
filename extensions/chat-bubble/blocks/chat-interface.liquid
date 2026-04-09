@@ -2,6 +2,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 
 <div class="shop-ai-chat-container">
+  <div class="shop-ai-chat-nudge" id="shop-ai-nudge">
+    <button class="shop-ai-chat-nudge-close" id="shop-ai-nudge-close">✕</button>
+    {{ block.settings.nudge_message }}
+  </div>
   <div class="shop-ai-chat-bubble" style="background-color: {{ block.settings.chat_bubble_color }}">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
@@ -9,7 +13,7 @@
   </div>
 
   <div class="shop-ai-chat-window">
-    <div class="shop-ai-chat-header">
+    <div class="shop-ai-chat-header" style="background-color: {{ block.settings.chat_header_color }}">
       <div>{{ 'chat.title' | t }}</div>
       <button class="shop-ai-chat-close">✕</button>
     </div>
@@ -20,7 +24,7 @@
 
     <div class="shop-ai-chat-input">
       <input type="text" placeholder="{{ 'chat.inputPlaceholder' | t }}">
-      <button class="shop-ai-chat-send">
+      <button class="shop-ai-chat-send" style="background-color: {{ block.settings.send_button_color }}">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="22" y1="2" x2="11" y2="13"></line>
           <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
@@ -34,7 +38,11 @@
 <script>
   window.shopChatConfig = {
     promptType: {{ block.settings.system_prompt | json }},
-    welcomeMessage: {{ block.settings.welcome_message | json }}
+    welcomeMessage: {{ block.settings.welcome_message | json }},
+    nudgeDelay: {{ block.settings.nudge_delay | default: 15 }},
+    serverUrl: {{ block.settings.server_url | json }},
+    userMessageColor: {{ block.settings.user_message_color | json }},
+    assistantMessageColor: {{ block.settings.assistant_message_color | json }}
   };
   window.shopId = {{ shop.id }};
 </script>
@@ -51,16 +59,66 @@
       "default": "#5046e4"
     },
     {
+      "type": "color",
+      "id": "chat_header_color",
+      "label": "Chat Header Color",
+      "default": "#5046e4"
+    },
+    {
+      "type": "color",
+      "id": "user_message_color",
+      "label": "Your Message Color",
+      "default": "#5046e4"
+    },
+    {
+      "type": "color",
+      "id": "assistant_message_color",
+      "label": "Bot Response Color",
+      "default": "#f1f1f1"
+    },
+    {
+      "type": "color",
+      "id": "send_button_color",
+      "label": "Send Button Color",
+      "default": "#5046e4"
+    },
+    {
       "type": "text",
       "id": "welcome_message",
       "label": "Welcome Message",
       "default": "👋 Hi there! How can I help you today?"
     },
     {
+      "type": "text",
+      "id": "nudge_message",
+      "label": "Nudge Message",
+      "default": "Une question ? Nous vous r\u00e9pondons instantan\u00e9ment \u2728"
+    },
+    {
+      "type": "range",
+      "id": "nudge_delay",
+      "label": "Nudge Delay (seconds)",
+      "min": 5,
+      "max": 60,
+      "step": 5,
+      "default": 15
+    },
+    {
+      "type": "text",
+      "id": "server_url",
+      "label": "Server URL",
+      "default": "https://localhost:3458",
+      "info": "URL of your deployed chat server (e.g. https://your-app.railway.app)"
+    },
+    {
       "type": "select",
       "id": "system_prompt",
       "label": "System Prompt",
       "options": [
+        {
+          "value": "savAgent",
+          "label": "Jison — SAV Agent"
+        },
         {
           "value": "standardAssistant",
           "label": "Standard Assistant"
@@ -70,7 +128,7 @@
           "label": "Enthusiastic Assistant"
         }
       ],
-      "default": "standardAssistant"
+      "default": "savAgent"
     }
   ]
 }

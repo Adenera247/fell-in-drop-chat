@@ -13,6 +13,14 @@ database.sqlite
 .env
 .env.*
 
+# Log files
+*.log
+dev-log*.txt
+
+# Database files
+*.sqlite
+*.sqlite-journal
+
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
