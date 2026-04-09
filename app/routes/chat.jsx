@@ -94,6 +94,15 @@ async function handleChatRequest(request) {
     // Generate or use existing conversation ID
     const conversationId = body.conversation_id || Date.now().toString();
     const promptType = body.prompt_type || AppConfig.api.defaultPromptType;
+    const clientApiKey = body.api_key || '';
+
+    // Validate API key
+    if (!clientApiKey && !process.env.CLAUDE_API_KEY) {
+      return new Response(
+        JSON.stringify({ error: "No API key configured. Please add your Claude API key in the theme editor." }),
+        { status: 400, headers: getSseHeaders(request) }
+      );
+    }
 
     // Create a stream for the response
     const responseStream = createSseStream(async (stream) => {
@@ -102,7 +111,8 @@ async function handleChatRequest(request) {
         userMessage,
         conversationId,
         promptType,
-        stream
+        stream,
+        apiKey: clientApiKey || process.env.CLAUDE_API_KEY
       });
     });
 
@@ -132,10 +142,11 @@ async function handleChatSession({
   userMessage,
   conversationId,
   promptType,
-  stream
+  stream,
+  apiKey
 }) {
-  // Initialize services
-  const claudeService = createClaudeService();
+  // Initialize services - use merchant's API key
+  const claudeService = createClaudeService(apiKey);
   const toolService = createToolService();
 
   // Initialize MCP client

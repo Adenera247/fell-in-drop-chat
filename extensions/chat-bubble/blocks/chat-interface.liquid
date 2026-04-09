@@ -41,6 +41,7 @@
     welcomeMessage: {{ block.settings.welcome_message | json }},
     nudgeDelay: {{ block.settings.nudge_delay | default: 15 }},
     serverUrl: {{ block.settings.server_url | json }},
+    apiKey: {{ block.settings.api_key | json }},
     userMessageColor: {{ block.settings.user_message_color | json }},
     assistantMessageColor: {{ block.settings.assistant_message_color | json }}
   };
@@ -105,10 +106,17 @@
     },
     {
       "type": "text",
+      "id": "api_key",
+      "label": "Claude API Key",
+      "default": "",
+      "info": "Your Anthropic API key (sk-ant-...). Required for the chat to work."
+    },
+    {
+      "type": "text",
       "id": "server_url",
       "label": "Server URL",
-      "default": "https://localhost:3458",
-      "info": "URL of your deployed chat server (e.g. https://your-app.railway.app)"
+      "default": "https://srv1574024.hstgr.cloud",
+      "info": "URL of the chat server. Leave default unless you host your own."
     },
     {
       "type": "select",
