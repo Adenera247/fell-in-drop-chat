@@ -45,7 +45,15 @@ function renderShopKnowledge(knowledge) {
     );
   }
 
-  if (policies.shipping || policies.refund || policies.privacy || policies.terms) {
+  if (
+    policies.shipping ||
+    policies.refund ||
+    policies.privacy ||
+    policies.terms ||
+    policies.legal ||
+    policies.contact ||
+    policies.subscription
+  ) {
     boutiqueLines.push("");
     boutiqueLines.push(`## Politiques de la boutique`);
     if (policies.shipping)
@@ -56,6 +64,12 @@ function renderShopKnowledge(knowledge) {
       boutiqueLines.push(`### Confidentialité\n${policies.privacy}`);
     if (policies.terms)
       boutiqueLines.push(`### CGU\n${policies.terms}`);
+    if (policies.legal)
+      boutiqueLines.push(`### Mentions légales\n${policies.legal}`);
+    if (policies.contact)
+      boutiqueLines.push(`### Contact\n${policies.contact}`);
+    if (policies.subscription)
+      boutiqueLines.push(`### Abonnements\n${policies.subscription}`);
   }
 
   if (collections.length) {

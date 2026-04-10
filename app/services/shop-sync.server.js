@@ -23,6 +23,10 @@ const PAGE_BODY_MAX_CHARS = 3000;
 const SCRAPED_CONTENT_MAX_CHARS = 1500;
 const METAFIELD_VALUE_MAX_CHARS = 300;
 
+// Shopify Admin GraphQL 2025-10+ removed shop.refundPolicy/shippingPolicy/...
+// Policies are now exposed via shop.shopPolicies[] { type body url title }.
+// Type is an enum: REFUND_POLICY, SHIPPING_POLICY, PRIVACY_POLICY,
+// TERMS_OF_SERVICE, LEGAL_NOTICE, CONTACT_INFORMATION, SUBSCRIPTION_POLICY.
 const SHOP_QUERY = `#graphql
   query ShopInfo {
     shop {
@@ -39,10 +43,12 @@ const SHOP_QUERY = `#graphql
         city
       }
       shipsToCountries
-      refundPolicy { body url }
-      shippingPolicy { body url }
-      privacyPolicy { body url }
-      termsOfService { body url }
+      shopPolicies {
+        type
+        title
+        body
+        url
+      }
     }
   }
 `;
@@ -273,6 +279,43 @@ async function fetchShopInfo(admin) {
   return data?.shop || null;
 }
 
+function extractPolicies(shopPolicies) {
+  // shopPolicies is an array of { type, title, body, url }. Index them by
+  // type enum so callers can access refund/shipping/privacy/terms by name.
+  const byType = {};
+  if (Array.isArray(shopPolicies)) {
+    for (const p of shopPolicies) {
+      if (!p?.type) continue;
+      byType[p.type] = p;
+    }
+  }
+  const get = (type) => byType[type] || null;
+  const refund = get("REFUND_POLICY");
+  const shipping = get("SHIPPING_POLICY");
+  const privacy = get("PRIVACY_POLICY");
+  const terms = get("TERMS_OF_SERVICE");
+  const legal = get("LEGAL_NOTICE");
+  const contact = get("CONTACT_INFORMATION");
+  const subscription = get("SUBSCRIPTION_POLICY");
+
+  return {
+    refund: truncate(stripHtml(refund?.body), PAGE_BODY_MAX_CHARS),
+    refundUrl: refund?.url || null,
+    shipping: truncate(stripHtml(shipping?.body), PAGE_BODY_MAX_CHARS),
+    shippingUrl: shipping?.url || null,
+    privacy: truncate(stripHtml(privacy?.body), PAGE_BODY_MAX_CHARS),
+    privacyUrl: privacy?.url || null,
+    terms: truncate(stripHtml(terms?.body), PAGE_BODY_MAX_CHARS),
+    termsUrl: terms?.url || null,
+    legal: truncate(stripHtml(legal?.body), PAGE_BODY_MAX_CHARS),
+    legalUrl: legal?.url || null,
+    contact: truncate(stripHtml(contact?.body), PAGE_BODY_MAX_CHARS),
+    contactUrl: contact?.url || null,
+    subscription: truncate(stripHtml(subscription?.body), PAGE_BODY_MAX_CHARS),
+    subscriptionUrl: subscription?.url || null,
+  };
+}
+
 function buildKnowledge(shopInfo, products, pages, collections = []) {
   return {
     schemaVersion: 1,
@@ -291,18 +334,7 @@ function buildKnowledge(shopInfo, products, pages, collections = []) {
           shipsToCountries: shopInfo.shipsToCountries || [],
         }
       : null,
-    policies: shopInfo
-      ? {
-          refund: truncate(stripHtml(shopInfo.refundPolicy?.body), PAGE_BODY_MAX_CHARS),
-          refundUrl: shopInfo.refundPolicy?.url || null,
-          shipping: truncate(stripHtml(shopInfo.shippingPolicy?.body), PAGE_BODY_MAX_CHARS),
-          shippingUrl: shopInfo.shippingPolicy?.url || null,
-          privacy: truncate(stripHtml(shopInfo.privacyPolicy?.body), PAGE_BODY_MAX_CHARS),
-          privacyUrl: shopInfo.privacyPolicy?.url || null,
-          terms: truncate(stripHtml(shopInfo.termsOfService?.body), PAGE_BODY_MAX_CHARS),
-          termsUrl: shopInfo.termsOfService?.url || null,
-        }
-      : {},
+    policies: shopInfo ? extractPolicies(shopInfo.shopPolicies) : {},
     pages,
     collections,
     products,
