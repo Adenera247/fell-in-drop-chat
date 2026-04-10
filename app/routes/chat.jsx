@@ -44,6 +44,115 @@ function detectFallback(message) {
   return FALLBACK_TEXT_RE.test(text);
 }
 
+/**
+ * Repairs a conversation history loaded from the DB so it is valid for
+ * Claude's Messages API. Two known problems this fixes:
+ *
+ *   1. Pre-existing code saved each tool_result in its OWN user message
+ *      (addToolResultToHistory was called once per tool_use block). Claude
+ *      requires ALL tool_result blocks for a given assistant tool_use batch
+ *      to appear in a SINGLE user message directly after the assistant.
+ *      This function consumes consecutive pure tool_result user messages
+ *      and merges them into one.
+ *
+ *   2. If a tool dispatch crashed mid-flow, the DB may have an assistant
+ *      message with tool_use blocks but no tool_result messages at all.
+ *      Synthetic tool_result blocks are generated for any missing ids so
+ *      Claude accepts the conversation.
+ *
+ * Behaviour-wise, the sanitizer is a pure function: it never mutates the
+ * input, and it emits exactly one user message with all tool_result blocks
+ * (plus any trailing user text merged in if needed) after every assistant
+ * message that contains tool_use blocks.
+ */
+function sanitizeConversationHistory(messages) {
+  const out = [];
+  let i = 0;
+
+  while (i < messages.length) {
+    const msg = messages[i];
+
+    // Pass-through for any message that isn't an assistant with tool_use
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
+      out.push(msg);
+      i += 1;
+      continue;
+    }
+
+    const toolUseIds = msg.content
+      .filter((c) => c?.type === "tool_use")
+      .map((c) => c.id);
+
+    if (toolUseIds.length === 0) {
+      out.push(msg);
+      i += 1;
+      continue;
+    }
+
+    // Assistant with tool_use: emit it, then process the following messages.
+    out.push(msg);
+    i += 1;
+
+    // Step 1 — consume consecutive PURE tool_result user messages and
+    // collect all their blocks.
+    const collectedResults = [];
+    const seenIds = new Set();
+
+    while (i < messages.length) {
+      const next = messages[i];
+      if (next.role !== "user") break;
+      if (!Array.isArray(next.content)) break;
+      const isPureToolResults =
+        next.content.length > 0 &&
+        next.content.every((c) => c?.type === "tool_result");
+      if (!isPureToolResults) break;
+
+      for (const block of next.content) {
+        if (!seenIds.has(block.tool_use_id)) {
+          collectedResults.push(block);
+          seenIds.add(block.tool_use_id);
+        }
+      }
+      i += 1;
+    }
+
+    // Step 2 — synthesize tool_result blocks for any tool_use ids that
+    // were never paired (catastrophic failure during prior turn).
+    for (const expectedId of toolUseIds) {
+      if (!seenIds.has(expectedId)) {
+        collectedResults.push({
+          type: "tool_result",
+          tool_use_id: expectedId,
+          content:
+            "Tool result missing — synthesized for conversation continuity.",
+          is_error: true,
+        });
+      }
+    }
+
+    // Step 3 — if the NEXT (still unconsumed) message is a user text
+    // message, merge the tool_result blocks with its content so we don't
+    // end up with two consecutive user messages.
+    let trailingUserBlocks = [];
+    if (i < messages.length && messages[i].role === "user") {
+      const next = messages[i];
+      if (Array.isArray(next.content)) {
+        trailingUserBlocks = next.content;
+      } else {
+        trailingUserBlocks = [{ type: "text", text: String(next.content) }];
+      }
+      i += 1;
+    }
+
+    out.push({
+      role: "user",
+      content: [...collectedResults, ...trailingUserBlocks],
+    });
+  }
+
+  return out;
+}
+
 
 /**
  * Rract Router loader function for handling GET requests
@@ -272,19 +381,24 @@ async function handleChatSession({
       console.log(`[chat] no shop knowledge yet for ${shopHostname} — fallback to MCP tools only`);
     }
 
-    // Format messages for Claude API
-    conversationHistory = dbMessages.map(dbMessage => {
+    // Format messages for Claude API, then sanitize to repair any pre-existing
+    // tool_use/tool_result mismatch in the DB (legacy conversations saved
+    // before the batching fix, or conversations where a tool dispatch crashed).
+    const rawHistory = dbMessages.map((dbMessage) => {
       let content;
       try {
         content = JSON.parse(dbMessage.content);
       } catch (e) {
         content = dbMessage.content;
       }
-      return {
-        role: dbMessage.role,
-        content
-      };
+      return { role: dbMessage.role, content };
     });
+    conversationHistory = sanitizeConversationHistory(rawHistory);
+    if (conversationHistory.length !== rawHistory.length) {
+      console.log(
+        `[chat] sanitized conversation ${conversationId}: ${rawHistory.length} → ${conversationHistory.length} messages`
+      );
+    }
 
     // Merge MCP tools with local tools. Local tools only become available
     // if we have a myshopify domain (i.e. the merchant installed the app),
@@ -292,10 +406,39 @@ async function handleChatSession({
     const localTools = myshopifyDomain ? getLocalTools() : [];
     const allTools = [...(mcpClient.tools || []), ...localTools];
 
-    // Execute the conversation stream
-    let finalMessage = { role: 'user', content: userMessage };
+    // Execute the conversation stream.
+    //
+    // Tool results are BATCHED: every tool_use block Claude emits in a
+    // single response must be paired with a tool_result block in the very
+    // next user message — and Claude's API rejects tool_result blocks
+    // scattered across multiple user messages. We accumulate all results
+    // in pendingToolResults during the onToolUse callbacks, then flush
+    // them as ONE user message at the top of the next loop iteration
+    // (before the next streamConversation call).
+    let finalMessage = { role: "user", content: userMessage };
+    let pendingToolResults = [];
 
     while (finalMessage.stop_reason !== "end_turn") {
+      // Flush batched tool_result blocks from the previous iteration as
+      // one consolidated user message.
+      if (pendingToolResults.length > 0) {
+        const batchMessage = {
+          role: "user",
+          content: pendingToolResults,
+        };
+        conversationHistory.push(batchMessage);
+        try {
+          await saveMessage(
+            conversationId,
+            "user",
+            JSON.stringify(pendingToolResults)
+          );
+        } catch (err) {
+          console.error("Error saving batched tool_result message:", err);
+        }
+        pendingToolResults = [];
+      }
+
       finalMessage = await claudeService.streamConversation(
         {
           messages: conversationHistory,
@@ -340,53 +483,86 @@ async function handleChatSession({
             stream.sendMessage({ type: 'message_complete' });
           },
 
-          // Handle tool use requests
+          // Handle tool use requests.
+          //
+          // IMPORTANT: we do NOT push to conversationHistory or call
+          // saveMessage here. Instead we accumulate tool_result blocks in
+          // pendingToolResults so they can be flushed as ONE user message
+          // at the top of the next while loop iteration. This is required
+          // by Claude's API when multiple tools are used in a single turn.
           onToolUse: async (content) => {
             const toolName = content.name;
             const toolArgs = content.input;
             const toolUseId = content.id;
 
-            const toolUseMessage = `Calling tool: ${toolName} with arguments: ${JSON.stringify(toolArgs)}`;
-
             stream.sendMessage({
-              type: 'tool_use',
-              tool_use_message: toolUseMessage
+              type: "tool_use",
+              tool_use_message: `Calling tool: ${toolName} with arguments: ${JSON.stringify(toolArgs)}`,
             });
 
-            // Dispatch: local tool first (runs on our server with whitelisted
-            // output), otherwise fall through to the MCP client.
+            // Dispatch with a safety net: any thrown exception becomes a
+            // synthetic error response so we ALWAYS produce a tool_result
+            // block for every tool_use id Claude sent.
             let toolUseResponse;
-            if (isLocalTool(toolName)) {
-              toolUseResponse = await callLocalTool(toolName, toolArgs, {
-                shop: myshopifyDomain,
-              });
-            } else {
-              toolUseResponse = await mcpClient.callTool(toolName, toolArgs);
+            try {
+              if (isLocalTool(toolName)) {
+                toolUseResponse = await callLocalTool(toolName, toolArgs, {
+                  shop: myshopifyDomain,
+                });
+              } else {
+                toolUseResponse = await mcpClient.callTool(toolName, toolArgs);
+              }
+            } catch (err) {
+              console.error(
+                `[chat] tool ${toolName} dispatch threw:`,
+                err.message
+              );
+              toolUseResponse = {
+                error: {
+                  type: "dispatch_error",
+                  data: `Tool ${toolName} crashed: ${err.message}`,
+                },
+              };
             }
 
-            // Handle tool response based on success/error
+            // Build the tool_result block content + handle side effects.
+            let resultContent;
+            let isError = false;
             if (toolUseResponse.error) {
-              await toolService.handleToolError(
-                toolUseResponse,
-                toolName,
-                toolUseId,
-                conversationHistory,
-                stream.sendMessage,
-                conversationId
-              );
+              resultContent = toolUseResponse.error.data;
+              isError = true;
+
+              // Preserve the original auth_required client signal
+              if (toolUseResponse.error.type === "auth_required") {
+                stream.sendMessage({ type: "auth_required" });
+              }
             } else {
-              await toolService.handleToolSuccess(
-                toolUseResponse,
-                toolName,
-                toolUseId,
-                conversationHistory,
-                productsToDisplay,
-                conversationId
-              );
+              resultContent = toolUseResponse.content;
+
+              // Product display side-effect (from the original handleToolSuccess)
+              if (toolName === AppConfig.tools.productSearchName) {
+                try {
+                  productsToDisplay.push(
+                    ...toolService.processProductSearchResult(toolUseResponse)
+                  );
+                } catch (e) {
+                  console.warn(
+                    "[chat] processProductSearchResult failed:",
+                    e.message
+                  );
+                }
+              }
             }
+
+            pendingToolResults.push({
+              type: "tool_result",
+              tool_use_id: toolUseId,
+              content: resultContent,
+              ...(isError ? { is_error: true } : {}),
+            });
 
             // Signal new message to client
-            stream.sendMessage({ type: 'new_message' });
+            stream.sendMessage({ type: "new_message" });
           },
 
           // Handle content block completion
@@ -400,6 +576,25 @@ async function handleChatSession({
           }
         }
       );
+    }
+
+    // Safety net: if the loop exited with pending tool_results (shouldn't
+    // normally happen because end_turn means Claude emitted no tool_use),
+    // persist them so the conversation isn't left in a broken state.
+    if (pendingToolResults.length > 0) {
+      console.warn(
+        `[chat] ${pendingToolResults.length} pending tool_result(s) at end of conversation — flushing`
+      );
+      const batchMessage = { role: "user", content: pendingToolResults };
+      conversationHistory.push(batchMessage);
+      await saveMessage(
+        conversationId,
+        "user",
+        JSON.stringify(pendingToolResults)
+      ).catch((err) =>
+        console.error("Final tool_result flush failed:", err)
+      );
+      pendingToolResults = [];
     }
 
     // Signal end of turn
