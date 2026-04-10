@@ -54,15 +54,15 @@ model CodeVerifier {
 }
 
 model Conversation {
-  id        String    @id
-  shopHost  String?                     // normalized host of the shop that owns this conversation
-  deletedAt DateTime?                   // soft-delete: set on uninstall, hard-deleted after 30 days
-  messages  Message[]
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id         String    @id
+  shopDomain String?                     // myshopify.com domain (stable identifier — never changes for the life of the shop)
+  deletedAt  DateTime?                   // soft-delete: set on uninstall, hard-deleted after 30 days
+  messages   Message[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
-  @@index([shopHost])
-  @@index([shopHost, deletedAt])
+  @@index([shopDomain])
+  @@index([shopDomain, deletedAt])
   @@index([deletedAt])
 }
 

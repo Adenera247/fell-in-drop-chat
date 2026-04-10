@@ -29,27 +29,23 @@ export const action = async ({ request }) => {
       }
       // CustomerToken rows are linked to conversations, not shop, so they
       // would linger. We clean them up along with the session: find all
-      // conversations belonging to this shop and wipe their customer tokens.
-      // (Note: we do this BEFORE soft-deleting the conversations so we can
-      // still query them.)
+      // conversations belonging to this shop (via the stable myshopify
+      // domain) and wipe their customer tokens. Done BEFORE the soft-delete
+      // so we can still query the conversations by their active state.
       try {
-        const state = await db.shopSyncState.findUnique({ where: { shop } });
-        const primaryHost = state?.primaryHost;
-        if (primaryHost) {
-          const conversationIds = await db.conversation
-            .findMany({
-              where: { shopHost: primaryHost },
-              select: { id: true },
-            })
-            .then((rows) => rows.map((r) => r.id));
-          if (conversationIds.length) {
-            await db.customerToken.deleteMany({
-              where: { conversationId: { in: conversationIds } },
-            });
-            await db.customerAccountUrls.deleteMany({
-              where: { conversationId: { in: conversationIds } },
-            });
-          }
+        const conversationIds = await db.conversation
+          .findMany({
+            where: { shopDomain: shop },
+            select: { id: true },
+          })
+          .then((rows) => rows.map((r) => r.id));
+        if (conversationIds.length) {
+          await db.customerToken.deleteMany({
+            where: { conversationId: { in: conversationIds } },
+          });
+          await db.customerAccountUrls.deleteMany({
+            where: { conversationId: { in: conversationIds } },
+          });
         }
       } catch (err) {
         console.warn(`[webhooks] ${shop}: customer-token cleanup failed:`, err.message);

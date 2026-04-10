@@ -23,8 +23,7 @@ const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 /**
  * Marks a shop's recoverable data as deleted. Conversations are matched by
- * primaryHost (the public storefront domain), which is what the public /chat
- * route tags them with.
+ * shopDomain (the myshopify domain, stored in Conversation.shopDomain).
  *
  * Returns a summary of affected rows.
  */
@@ -33,14 +32,10 @@ export async function softDeleteShopData(shop) {
 
   const now = new Date();
 
-  // Read the ShopSyncState first so we can use its primaryHost to find the
-  // conversations that belong to this shop.
-  const state = await prisma.shopSyncState.findUnique({ where: { shop } });
-  const primaryHost = state?.primaryHost;
-
   // Soft-delete the ShopSyncState row (even if already soft-deleted, this
   // refreshes the timestamp — last uninstall wins).
   let syncStateCount = 0;
+  const state = await prisma.shopSyncState.findUnique({ where: { shop } });
   if (state) {
     await prisma.shopSyncState.update({
       where: { shop },
@@ -49,18 +44,14 @@ export async function softDeleteShopData(shop) {
     syncStateCount = 1;
   }
 
-  // Soft-delete matching conversations. We match on primaryHost because
-  // Conversation.shopHost is the normalized public host, not the myshopify
-  // domain. If primaryHost is null (sync never completed), we can't match
-  // conversations → skip that step rather than soft-delete the wrong ones.
-  let conversationCount = 0;
-  if (primaryHost) {
-    const result = await prisma.conversation.updateMany({
-      where: { shopHost: primaryHost, deletedAt: null },
-      data: { deletedAt: now },
-    });
-    conversationCount = result.count;
-  }
+  // Soft-delete matching conversations using the stable myshopify domain.
+  // This works regardless of whether the merchant changed their custom
+  // domain since the conversations were created.
+  const result = await prisma.conversation.updateMany({
+    where: { shopDomain: shop, deletedAt: null },
+    data: { deletedAt: now },
+  });
+  const conversationCount = result.count;
 
   return { syncState: syncStateCount, conversations: conversationCount };
 }
@@ -98,16 +89,12 @@ export async function restoreShopData(shop) {
     data: { deletedAt: null },
   });
 
-  // Restore matching conversations (same primaryHost match rule as soft-delete)
-  const primaryHost = state.primaryHost;
-  let conversationCount = 0;
-  if (primaryHost) {
-    const result = await prisma.conversation.updateMany({
-      where: { shopHost: primaryHost },
-      data: { deletedAt: null },
-    });
-    conversationCount = result.count;
-  }
+  // Restore matching conversations using the stable myshopify domain.
+  const result = await prisma.conversation.updateMany({
+    where: { shopDomain: shop },
+    data: { deletedAt: null },
+  });
+  const conversationCount = result.count;
 
   return {
     restored: true,

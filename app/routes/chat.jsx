@@ -310,16 +310,25 @@ async function handleChatSession({
     return;
   }
 
-  const shopHostname = resolved.host;
-  // The myshopify domain (e.g. foo.myshopify.com) is what unauthenticated.admin()
-  // uses to look up the stored offline token. It's only available if the
-  // merchant has installed the app (ShopSyncState row exists).
+  // shopDomain is ALWAYS the myshopify.com domain when the shop is known in
+  // our DB. If the shop has never been synced yet, it falls back to whatever
+  // hostname was resolved (storeDomain or Origin) so the conversation can
+  // still be tagged consistently.
+  const shopDomain = resolved.shopDomain;
+  // myshopifyDomain is the authoritative myshopify identifier used by
+  // unauthenticated.admin() to fetch the stored offline token. Only
+  // available if the merchant is installed (ShopSyncState row exists).
   const myshopifyDomain = resolved.state?.shop || null;
+  // The public host of the storefront (custom domain if set, else
+  // myshopify). Used for the MCP storefront URL because Shopify's MCP
+  // server wants to be hit at the public-facing domain.
+  const storefrontHost =
+    resolved.state?.primaryHost || resolved.state?.shop || shopDomain;
 
-  // Enforce conversation ↔ shop binding. If an existing conversation is
-  // reused from a different shop, reject the request.
+  // Enforce conversation ↔ shopDomain binding. If an existing conversation
+  // is reused from a different shop, reject the request.
   try {
-    await enforceConversationShop(conversationId, shopHostname);
+    await enforceConversationShop(conversationId, shopDomain);
   } catch (err) {
     if (err.code === "SHOP_MISMATCH") {
       console.warn(`[chat] rejecting ${conversationId}: ${err.message}`);
@@ -332,14 +341,15 @@ async function handleChatSession({
     throw err;
   }
 
-  // Use the resolved host for MCP/storefront URL — never trust body-only values.
-  const shopDomain = `https://${shopHostname}`;
-  const { mcpApiUrl } = await getCustomerAccountUrls(shopDomain, conversationId);
+  // Build the storefront URL from the resolved host (myshopify or custom
+  // domain) — never trust body-only values.
+  const storefrontUrl = `https://${storefrontHost}`;
+  const { mcpApiUrl } = await getCustomerAccountUrls(storefrontUrl, conversationId);
 
-  console.log(`MCP connecting to store: ${shopDomain} (shopId: ${shopId})`);
+  console.log(`MCP connecting to store: ${storefrontUrl} (shopId: ${shopId}, shopDomain: ${shopDomain})`);
 
   const mcpClient = new MCPClient(
-    shopDomain,
+    storefrontUrl,
     conversationId,
     shopId,
     mcpApiUrl,
@@ -369,16 +379,18 @@ async function handleChatSession({
     // Save user message to the database
     await saveMessage(conversationId, 'user', userMessage);
 
-    // Fetch conversation history and shop knowledge in parallel
+    // Fetch conversation history and shop knowledge in parallel.
+    // getShopKnowledge accepts either the myshopify domain or the public
+    // host — we pass shopDomain (myshopify) because it's the stable key.
     const [dbMessages, shopKnowledge] = await Promise.all([
       getConversationHistory(conversationId),
-      shopHostname ? getShopKnowledge(shopHostname) : Promise.resolve(null),
+      shopDomain ? getShopKnowledge(shopDomain) : Promise.resolve(null),
     ]);
 
     if (shopKnowledge) {
-      console.log(`[chat] loaded shop knowledge for ${shopHostname} (${shopKnowledge.productCount ?? 0} products)`);
-    } else if (shopHostname) {
-      console.log(`[chat] no shop knowledge yet for ${shopHostname} — fallback to MCP tools only`);
+      console.log(`[chat] loaded shop knowledge for ${shopDomain} (${shopKnowledge.productCount ?? 0} products)`);
+    } else if (shopDomain) {
+      console.log(`[chat] no shop knowledge yet for ${shopDomain} — fallback to MCP tools only`);
     }
 
     // Format messages for Claude API, then sanitize to repair any pre-existing
