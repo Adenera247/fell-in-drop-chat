@@ -67,11 +67,14 @@ model Message {
   id             String       @id @default(cuid())
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role           String       // "user" or "assistant"
+  role           String       // "user" | "assistant" | "merchant" | "system"
   content        String
+  tokensUsed     Int?         // Claude tokens (input + output) for assistant messages
+  fallbackUsed   Boolean?     @default(false) // true if the bot couldn't resolve (escalation or "I'll transfer" text)
   createdAt      DateTime     @default(now())
 
   @@index([conversationId])
+  @@index([createdAt])
 }
 
 model CustomerAccountUrls {

@@ -11,6 +11,38 @@ import { createToolService } from "../services/tool.server";
 import { getShopKnowledge } from "../services/shop-knowledge.server";
 import { resolveShopForRequest, enforceConversationShop } from "../services/shop-identity.server";
 
+// Regex matching phrases where the bot admits it can't help and defers to
+// the human team — used to flag the message as "fallback" for analytics.
+const FALLBACK_TEXT_RE =
+  /je (la |le )?transmets|l['’][ée]quipe (te |vous )?(revient|recontacte|repond)|on (te |vous )?recontacte|je ne (sais|peux) pas (t['’]aider|vous aider|repondre)|on (va |te |vous )?(revenir|transmettre) (vers|à|a) (toi|vous|l['’][ée]quipe)|contacte(r)? l['’][ée]quipe|hors de mes competences|hors de ma competence/i;
+
+function extractAssistantText(content) {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c) => c?.type === "text" && typeof c.text === "string")
+      .map((c) => c.text)
+      .join(" ");
+  }
+  return "";
+}
+
+function detectFallback(message) {
+  if (!message?.content) return false;
+  // Signal A: Claude invoked a tool named escalate_* (will be defined in Phase 2)
+  if (Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (block?.type === "tool_use" && typeof block.name === "string") {
+        if (block.name.startsWith("escalate")) return true;
+      }
+    }
+  }
+  // Signal B: text pattern indicating the bot is punting to humans
+  const text = extractAssistantText(message.content);
+  return FALLBACK_TEXT_RE.test(text);
+}
+
 
 /**
  * Rract Router loader function for handling GET requests
@@ -276,7 +308,19 @@ async function handleChatSession({
               content: message.content
             });
 
-            saveMessage(conversationId, message.role, JSON.stringify(message.content))
+            // Capture metrics for assistant messages: token usage + fallback detection.
+            // Only assistant turns have usage data from Claude; user/tool_result
+            // messages saved here come through other paths.
+            const meta = {};
+            if (message.role === "assistant") {
+              const usage = message.usage;
+              if (usage) {
+                meta.tokensUsed = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+              }
+              meta.fallbackUsed = detectFallback(message);
+            }
+
+            saveMessage(conversationId, message.role, JSON.stringify(message.content), meta)
               .catch((error) => {
                 console.error("Error saving message to database:", error);
               });

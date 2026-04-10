@@ -12,12 +12,16 @@
  */
 import prisma from "../db.server";
 import { normalizeHost } from "./shop-identity.server";
+import { scrapeStorefront, mergeScrapedContent } from "./storefront-scraper.server";
 
 const MAX_KNOWLEDGE_BYTES = 4 * 1024 * 1024; // 4 MB (metafield hard limit ~5 MB)
 const MAX_PRODUCTS = 500;
 const MAX_PAGES = 50;
-const DESCRIPTION_MAX_CHARS = 500;
-const PAGE_BODY_MAX_CHARS = 2000;
+const MAX_COLLECTIONS = 50;
+const DESCRIPTION_MAX_CHARS = 2000;
+const PAGE_BODY_MAX_CHARS = 3000;
+const SCRAPED_CONTENT_MAX_CHARS = 1500;
+const METAFIELD_VALUE_MAX_CHARS = 300;
 
 const SHOP_QUERY = `#graphql
   query ShopInfo {
@@ -53,6 +57,7 @@ const PRODUCTS_QUERY = `#graphql
           handle
           title
           description
+          descriptionHtml
           vendor
           productType
           tags
@@ -72,6 +77,24 @@ const PRODUCTS_QUERY = `#graphql
                 price
                 sku
                 availableForSale
+              }
+            }
+          }
+          metafields(first: 15) {
+            edges {
+              node {
+                namespace
+                key
+                value
+                type
+              }
+            }
+          }
+          collections(first: 5) {
+            edges {
+              node {
+                handle
+                title
               }
             }
           }
@@ -96,18 +119,66 @@ const PAGES_QUERY = `#graphql
   }
 `;
 
+const COLLECTIONS_QUERY = `#graphql
+  query Collections {
+    collections(first: 50) {
+      edges {
+        node {
+          id
+          handle
+          title
+          description
+          productsCount { count }
+        }
+      }
+    }
+  }
+`;
+
 function truncate(str, max) {
   if (!str) return "";
   const clean = String(str).replace(/\s+/g, " ").trim();
   return clean.length > max ? clean.slice(0, max) + "…" : clean;
 }
 
+function stripHtml(html) {
+  if (!html) return "";
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function compactMetafields(edges) {
+  if (!Array.isArray(edges)) return [];
+  return edges
+    .map((e) => e?.node)
+    .filter((n) => n && n.value)
+    .map((n) => ({
+      key: `${n.namespace}.${n.key}`,
+      type: n.type,
+      value: truncate(String(n.value), METAFIELD_VALUE_MAX_CHARS),
+    }));
+}
+
 function compactProduct(node) {
+  // Prefer plain description; fall back to HTML-stripped descriptionHtml if empty.
+  let description = node.description || "";
+  if (!description && node.descriptionHtml) {
+    description = stripHtml(node.descriptionHtml);
+  }
+
   return {
     id: node.id,
     handle: node.handle,
     title: node.title,
-    description: truncate(node.description, DESCRIPTION_MAX_CHARS),
+    description: truncate(description, DESCRIPTION_MAX_CHARS),
     vendor: node.vendor || null,
     productType: node.productType || null,
     tags: node.tags || [],
@@ -125,11 +196,27 @@ function compactProduct(node) {
       sku: e.node.sku,
       available: e.node.availableForSale,
     })),
+    metafields: compactMetafields(node.metafields?.edges),
+    collections: (node.collections?.edges || []).map((e) => ({
+      handle: e.node.handle,
+      title: e.node.title,
+    })),
   };
 }
 
 async function runQuery(admin, query, variables = {}) {
-  const res = await admin.graphql(query, { variables });
+  let res;
+  try {
+    res = await admin.graphql(query, { variables });
+  } catch (err) {
+    // Shopify admin client sometimes throws a Response object (e.g. 302
+    // redirect when the request context is lost). Surface that as a clear
+    // error so callers don't just see "undefined".
+    if (err instanceof Response) {
+      throw new Error(`Admin GraphQL threw HTTP ${err.status} — likely session/context issue`);
+    }
+    throw err;
+  }
   const json = await res.json();
   if (json.errors) {
     throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`);
@@ -156,10 +243,27 @@ async function fetchPages(admin) {
     return (data?.pages?.edges || []).slice(0, MAX_PAGES).map((e) => ({
       handle: e.node.handle,
       title: e.node.title,
-      body: truncate(e.node.body, PAGE_BODY_MAX_CHARS),
+      body: truncate(stripHtml(e.node.body), PAGE_BODY_MAX_CHARS),
     }));
   } catch (err) {
     console.warn("fetchPages failed:", err.message);
+    return [];
+  }
+}
+
+async function fetchCollections(admin) {
+  try {
+    const data = await runQuery(admin, COLLECTIONS_QUERY);
+    return (data?.collections?.edges || [])
+      .slice(0, MAX_COLLECTIONS)
+      .map((e) => ({
+        handle: e.node.handle,
+        title: e.node.title,
+        description: truncate(e.node.description, 400),
+        productCount: e.node.productsCount?.count ?? null,
+      }));
+  } catch (err) {
+    console.warn("fetchCollections failed:", err.message);
     return [];
   }
 }
@@ -169,7 +273,7 @@ async function fetchShopInfo(admin) {
   return data?.shop || null;
 }
 
-function buildKnowledge(shopInfo, products, pages) {
+function buildKnowledge(shopInfo, products, pages, collections = []) {
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -189,19 +293,21 @@ function buildKnowledge(shopInfo, products, pages) {
       : null,
     policies: shopInfo
       ? {
-          refund: truncate(shopInfo.refundPolicy?.body, PAGE_BODY_MAX_CHARS),
+          refund: truncate(stripHtml(shopInfo.refundPolicy?.body), PAGE_BODY_MAX_CHARS),
           refundUrl: shopInfo.refundPolicy?.url || null,
-          shipping: truncate(shopInfo.shippingPolicy?.body, PAGE_BODY_MAX_CHARS),
+          shipping: truncate(stripHtml(shopInfo.shippingPolicy?.body), PAGE_BODY_MAX_CHARS),
           shippingUrl: shopInfo.shippingPolicy?.url || null,
-          privacy: truncate(shopInfo.privacyPolicy?.body, PAGE_BODY_MAX_CHARS),
+          privacy: truncate(stripHtml(shopInfo.privacyPolicy?.body), PAGE_BODY_MAX_CHARS),
           privacyUrl: shopInfo.privacyPolicy?.url || null,
-          terms: truncate(shopInfo.termsOfService?.body, PAGE_BODY_MAX_CHARS),
+          terms: truncate(stripHtml(shopInfo.termsOfService?.body), PAGE_BODY_MAX_CHARS),
           termsUrl: shopInfo.termsOfService?.url || null,
         }
       : {},
     pages,
+    collections,
     products,
     productCount: products.length,
+    scrapedPages: [],
   };
 }
 
@@ -209,23 +315,43 @@ function shrinkIfTooBig(knowledge) {
   let json = JSON.stringify(knowledge);
   if (Buffer.byteLength(json, "utf8") <= MAX_KNOWLEDGE_BYTES) return json;
 
-  // First pass: drop variants + tighten descriptions
+  // Pass 1: drop scraped pages body (redundant with API data, lowest value)
+  if (knowledge.scrapedPages?.length) {
+    knowledge.scrapedPages = knowledge.scrapedPages.map((p) => ({
+      ...p,
+      content: truncate(p.content, 500),
+    }));
+    json = JSON.stringify(knowledge);
+    if (Buffer.byteLength(json, "utf8") <= MAX_KNOWLEDGE_BYTES) return json;
+  }
+
+  // Pass 2: drop scraped content on products (redundant with description)
   knowledge.products = knowledge.products.map((p) => ({
     ...p,
-    description: truncate(p.description, 200),
-    variants: [],
+    scrapedContent: undefined,
   }));
   json = JSON.stringify(knowledge);
   if (Buffer.byteLength(json, "utf8") <= MAX_KNOWLEDGE_BYTES) return json;
 
-  // Second pass: truncate product list
+  // Pass 3: drop variants + tighten descriptions
+  knowledge.products = knowledge.products.map((p) => ({
+    ...p,
+    description: truncate(p.description, 400),
+    variants: [],
+    metafields: (p.metafields || []).slice(0, 5),
+  }));
+  json = JSON.stringify(knowledge);
+  if (Buffer.byteLength(json, "utf8") <= MAX_KNOWLEDGE_BYTES) return json;
+
+  // Pass 4: truncate product list
   knowledge.products = knowledge.products.slice(0, 200);
   knowledge.productCount = knowledge.products.length;
   json = JSON.stringify(knowledge);
   if (Buffer.byteLength(json, "utf8") <= MAX_KNOWLEDGE_BYTES) return json;
 
-  // Last resort: drop pages bodies
+  // Pass 5: drop pages bodies entirely
   knowledge.pages = knowledge.pages.map((p) => ({ ...p, body: "" }));
+  knowledge.scrapedPages = [];
   return JSON.stringify(knowledge);
 }
 
@@ -269,17 +395,43 @@ export async function syncShopKnowledge(admin, shop) {
   });
 
   try {
-    const [shopInfo, products, pages] = await Promise.all([
+    const [shopInfo, products, pages, collections] = await Promise.all([
       fetchShopInfo(admin),
       fetchAllProducts(admin),
       fetchPages(admin),
+      fetchCollections(admin),
     ]);
 
     if (!shopInfo?.id) {
       throw new Error("Failed to fetch shop info (no shop id returned)");
     }
 
-    const knowledge = buildKnowledge(shopInfo, products, pages);
+    const knowledge = buildKnowledge(shopInfo, products, pages, collections);
+
+    // Phase 1.5 — Storefront scraping fallback. Visits the merchant's public
+    // pages via sitemap.xml and captures text that the Admin API may miss
+    // (theme sections with hard-coded info, app widgets, FAQ accordions, etc.).
+    // If anything fails, we continue with API-only data — no regression.
+    const storefrontUrl = shopInfo.primaryDomain?.url;
+    if (storefrontUrl) {
+      try {
+        const scraped = await scrapeStorefront(storefrontUrl, {
+          maxPages: 300,
+          concurrency: 5,
+          timeoutMs: 10_000,
+        });
+        mergeScrapedContent(knowledge, scraped, { maxCharsPerPage: SCRAPED_CONTENT_MAX_CHARS });
+        console.log(
+          `[shop-sync] ${shop}: scraped ${scraped.pages.length} storefront pages`
+        );
+      } catch (err) {
+        console.warn(
+          `[shop-sync] ${shop}: storefront scrape failed (continuing without):`,
+          err.message
+        );
+      }
+    }
+
     const json = shrinkIfTooBig(knowledge);
 
     await writeMetafield(admin, shopInfo.id, json);

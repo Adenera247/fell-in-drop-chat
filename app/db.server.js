@@ -168,11 +168,14 @@ export async function createOrUpdateConversation(conversationId) {
 /**
  * Save a message to the database
  * @param {string} conversationId - The conversation ID
- * @param {string} role - The message role (user or assistant)
+ * @param {string} role - "user" | "assistant" | "merchant" | "system"
  * @param {string} content - The message content
+ * @param {Object} [meta] - Optional metrics
+ * @param {number} [meta.tokensUsed] - Total tokens consumed for this message (assistant only)
+ * @param {boolean} [meta.fallbackUsed] - True if the bot escalated or said "I'll transfer"
  * @returns {Promise<Object>} - The saved message
  */
-export async function saveMessage(conversationId, role, content) {
+export async function saveMessage(conversationId, role, content, meta = {}) {
   try {
     // Ensure the conversation exists
     await createOrUpdateConversation(conversationId);
@@ -182,8 +185,10 @@ export async function saveMessage(conversationId, role, content) {
       data: {
         conversationId,
         role,
-        content
-      }
+        content,
+        tokensUsed: meta.tokensUsed ?? null,
+        fallbackUsed: meta.fallbackUsed ?? false,
+      },
     });
   } catch (error) {
     console.error('Error saving message:', error);

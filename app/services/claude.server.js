@@ -25,6 +25,8 @@ function renderShopKnowledge(knowledge) {
   const shop = knowledge.shop || {};
   const policies = knowledge.policies || {};
   const pages = knowledge.pages || [];
+  const collections = knowledge.collections || [];
+  const scrapedPages = knowledge.scrapedPages || [];
   const products = knowledge.products || [];
 
   // --- Boutique context ---
@@ -56,12 +58,31 @@ function renderShopKnowledge(knowledge) {
       boutiqueLines.push(`### CGU\n${policies.terms}`);
   }
 
+  if (collections.length) {
+    boutiqueLines.push("");
+    boutiqueLines.push(`## Collections / Catégories`);
+    for (const c of collections) {
+      const meta = c.productCount != null ? ` (${c.productCount} produits)` : "";
+      boutiqueLines.push(`- **${c.title}**${meta}`);
+      if (c.description) boutiqueLines.push(`  ${c.description}`);
+    }
+  }
+
   if (pages.length) {
     boutiqueLines.push("");
     boutiqueLines.push(`## Pages de la boutique`);
     for (const p of pages) {
       boutiqueLines.push(`### ${p.title}`);
       if (p.body) boutiqueLines.push(p.body);
+    }
+  }
+
+  if (scrapedPages.length) {
+    boutiqueLines.push("");
+    boutiqueLines.push(`## Pages publiques supplémentaires (capturées depuis la boutique)`);
+    for (const sp of scrapedPages) {
+      boutiqueLines.push(`### ${sp.title || sp.url}`);
+      if (sp.content) boutiqueLines.push(sp.content);
     }
   }
 
@@ -83,6 +104,26 @@ function renderShopKnowledge(knowledge) {
       if (p.url) parts.push(`[lien](${p.url})`);
       productLines.push(`- ${parts.join(" · ")}`);
       if (p.description) productLines.push(`  ${p.description}`);
+
+      // Metafields — where merchants typically stash warranty, delivery delays, etc.
+      if (Array.isArray(p.metafields) && p.metafields.length) {
+        productLines.push(`  Infos additionnelles :`);
+        for (const mf of p.metafields) {
+          productLines.push(`  - ${mf.key}: ${mf.value}`);
+        }
+      }
+
+      // Scraped page content — fallback capture from the public product page
+      if (p.scrapedContent) {
+        productLines.push(`  Contenu de la page produit publique :`);
+        productLines.push(`  ${p.scrapedContent}`);
+      }
+
+      // Collections membership — helps for "do you have any X category?"
+      if (Array.isArray(p.collections) && p.collections.length) {
+        const colList = p.collections.map((c) => c.title).join(", ");
+        productLines.push(`  Catégories : ${colList}`);
+      }
     }
   }
 
