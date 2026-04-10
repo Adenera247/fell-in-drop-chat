@@ -23,10 +23,8 @@ const PAGE_BODY_MAX_CHARS = 3000;
 const SCRAPED_CONTENT_MAX_CHARS = 1500;
 const METAFIELD_VALUE_MAX_CHARS = 300;
 
-// Shopify Admin GraphQL 2025-10+ removed shop.refundPolicy/shippingPolicy/...
-// Policies are now exposed via shop.shopPolicies[] { type body url title }.
-// Type is an enum: REFUND_POLICY, SHIPPING_POLICY, PRIVACY_POLICY,
-// TERMS_OF_SERVICE, LEGAL_NOTICE, CONTACT_INFORMATION, SUBSCRIPTION_POLICY.
+// Core shop info — uses ONLY fields that require no special scope. Never
+// fails on scope issues, so we can always establish shop.id + primaryHost.
 const SHOP_QUERY = `#graphql
   query ShopInfo {
     shop {
@@ -43,6 +41,19 @@ const SHOP_QUERY = `#graphql
         city
       }
       shipsToCountries
+    }
+  }
+`;
+
+// Policies are fetched separately because they require the
+// read_legal_policies scope, which the merchant might not have granted yet.
+// Shopify Admin GraphQL 2025-10+ exposes them via shop.shopPolicies[]
+// { type body url title }. Type is an enum: REFUND_POLICY, SHIPPING_POLICY,
+// PRIVACY_POLICY, TERMS_OF_SERVICE, LEGAL_NOTICE, CONTACT_INFORMATION,
+// SUBSCRIPTION_POLICY.
+const POLICIES_QUERY = `#graphql
+  query ShopPolicies {
+    shop {
       shopPolicies {
         type
         title
@@ -53,39 +64,47 @@ const SHOP_QUERY = `#graphql
   }
 `;
 
-const PRODUCTS_QUERY = `#graphql
-  query Products($cursor: String) {
+// Base product fields — always available with read_products scope.
+const PRODUCT_CORE_FIELDS = `
+  id
+  handle
+  title
+  description
+  descriptionHtml
+  vendor
+  productType
+  tags
+  status
+  onlineStoreUrl
+  featuredImage { url altText }
+  priceRangeV2 {
+    minVariantPrice { amount currencyCode }
+    maxVariantPrice { amount currencyCode }
+  }
+  totalInventory
+  variants(first: 5) {
+    edges {
+      node {
+        id
+        title
+        price
+        sku
+        availableForSale
+      }
+    }
+  }
+`;
+
+// "Full" query includes metafields + nested collections. These may require
+// additional scopes or access grants on some shops — if the query fails,
+// we fall back to PRODUCTS_QUERY_CORE.
+const PRODUCTS_QUERY_FULL = `#graphql
+  query ProductsFull($cursor: String) {
     products(first: 100, after: $cursor) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id
-          handle
-          title
-          description
-          descriptionHtml
-          vendor
-          productType
-          tags
-          status
-          onlineStoreUrl
-          featuredImage { url altText }
-          priceRangeV2 {
-            minVariantPrice { amount currencyCode }
-            maxVariantPrice { amount currencyCode }
-          }
-          totalInventory
-          variants(first: 5) {
-            edges {
-              node {
-                id
-                title
-                price
-                sku
-                availableForSale
-              }
-            }
-          }
+          ${PRODUCT_CORE_FIELDS}
           metafields(first: 15) {
             edges {
               node {
@@ -104,6 +123,19 @@ const PRODUCTS_QUERY = `#graphql
               }
             }
           }
+        }
+      }
+    }
+  }
+`;
+
+const PRODUCTS_QUERY_CORE = `#graphql
+  query ProductsCore($cursor: String) {
+    products(first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          ${PRODUCT_CORE_FIELDS}
         }
       }
     }
@@ -231,10 +263,31 @@ async function runQuery(admin, query, variables = {}) {
 }
 
 async function fetchAllProducts(admin) {
+  // Try the full query first (with metafields + collections). If it fails
+  // with an access error, fall back to the core query — we still get all
+  // the essential product data, just without the enrichment fields.
+  let query = PRODUCTS_QUERY_FULL;
+  let useCoreFallback = false;
+
   const out = [];
   let cursor = null;
   while (out.length < MAX_PRODUCTS) {
-    const data = await runQuery(admin, PRODUCTS_QUERY, { cursor });
+    let data;
+    try {
+      data = await runQuery(admin, query, { cursor });
+    } catch (err) {
+      if (!useCoreFallback && /access denied|required access/i.test(err.message)) {
+        console.warn(
+          "fetchAllProducts: full query denied, falling back to core query —",
+          err.message
+        );
+        query = PRODUCTS_QUERY_CORE;
+        useCoreFallback = true;
+        continue; // retry this same cursor with the core query
+      }
+      console.warn("fetchAllProducts failed:", err.message);
+      return out.slice(0, MAX_PRODUCTS);
+    }
     const edges = data?.products?.edges || [];
     for (const e of edges) out.push(compactProduct(e.node));
     if (!data?.products?.pageInfo?.hasNextPage) break;
@@ -279,6 +332,17 @@ async function fetchShopInfo(admin) {
   return data?.shop || null;
 }
 
+async function fetchShopPolicies(admin) {
+  try {
+    const data = await runQuery(admin, POLICIES_QUERY);
+    return data?.shop?.shopPolicies || [];
+  } catch (err) {
+    // Most common cause: read_legal_policies scope not granted. Not fatal.
+    console.warn("fetchShopPolicies failed:", err.message);
+    return [];
+  }
+}
+
 function extractPolicies(shopPolicies) {
   // shopPolicies is an array of { type, title, body, url }. Index them by
   // type enum so callers can access refund/shipping/privacy/terms by name.
@@ -316,7 +380,7 @@ function extractPolicies(shopPolicies) {
   };
 }
 
-function buildKnowledge(shopInfo, products, pages, collections = []) {
+function buildKnowledge(shopInfo, products, pages, collections = [], shopPolicies = []) {
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -334,7 +398,7 @@ function buildKnowledge(shopInfo, products, pages, collections = []) {
           shipsToCountries: shopInfo.shipsToCountries || [],
         }
       : null,
-    policies: shopInfo ? extractPolicies(shopInfo.shopPolicies) : {},
+    policies: extractPolicies(shopPolicies),
     pages,
     collections,
     products,
@@ -427,18 +491,23 @@ export async function syncShopKnowledge(admin, shop) {
   });
 
   try {
-    const [shopInfo, products, pages, collections] = await Promise.all([
+    // fetchShopInfo is the only call that MUST succeed — we need shop.id to
+    // write the metafield. Everything else is wrapped in its own try/catch
+    // inside the fetch* helpers and returns [] on any failure, so a missing
+    // scope on one resource never kills the whole sync.
+    const [shopInfo, products, pages, collections, shopPolicies] = await Promise.all([
       fetchShopInfo(admin),
       fetchAllProducts(admin),
       fetchPages(admin),
       fetchCollections(admin),
+      fetchShopPolicies(admin),
     ]);
 
     if (!shopInfo?.id) {
       throw new Error("Failed to fetch shop info (no shop id returned)");
     }
 
-    const knowledge = buildKnowledge(shopInfo, products, pages, collections);
+    const knowledge = buildKnowledge(shopInfo, products, pages, collections, shopPolicies);
 
     // Phase 1.5 — Storefront scraping fallback. Visits the merchant's public
     // pages via sitemap.xml and captures text that the Admin API may miss
