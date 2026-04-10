@@ -51,6 +51,7 @@
     box-shadow: 0 4px 15px rgba(0, 0, 0, 0.12);
     font-size: 14px;
     line-height: 1.4;
+    min-width: 200px;
     max-width: 250px;
     white-space: normal;
     word-wrap: break-word;
@@ -91,6 +92,7 @@
   @media (max-width: 480px) {
     .shop-ai-chat-nudge {
       bottom: 60px;
+      min-width: 200px;
       max-width: 220px;
       font-size: 13px;
     }

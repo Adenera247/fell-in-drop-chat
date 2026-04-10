@@ -4,7 +4,7 @@ client_id = "56374e85fd6e6eea470f0523c274c13c"
 name = "Claude Chat Bot"
 application_url = "https://srv1574024.hstgr.cloud"
 embedded = true
-handle = "fell-in-drop-chat"
+handle = "claude-chat-bot"
 
 [build]
 automatically_update_urls_on_dev = true
@@ -12,9 +12,25 @@ automatically_update_urls_on_dev = true
 [webhooks]
 api_version = "2026-04"
 
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/api/webhooks"
+
+  [[webhooks.subscriptions]]
+  topics = [ "products/create", "products/update", "products/delete" ]
+  uri = "/api/webhooks"
+
+  [[webhooks.subscriptions]]
+  topics = [ "collections/update" ]
+  uri = "/api/webhooks"
+
+  [[webhooks.subscriptions]]
+  topics = [ "shop/update" ]
+  uri = "/api/webhooks"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_all_orders,read_analytics,read_apps,read_audit_events,read_customer_events,read_cart_transforms,read_validations,read_cash_tracking,read_channels,read_checkout_and_accounts_configurations,read_checkout_branding_settings,read_companies,read_custom_fulfillment_services,read_custom_pixels,read_customers,read_customer_data_erasure,read_customer_payment_methods,read_customer_merge,read_delivery_customizations,read_price_rules,read_discounts,read_discounts_allocator_functions,read_discovery,read_draft_orders,read_files,read_fulfillment_constraint_rules,read_fulfillments,read_gift_card_transactions,read_gift_cards,read_inventory,read_inventory_shipments,read_inventory_shipments_received_items,read_inventory_transfers,read_legal_policies,read_delivery_option_generators,read_locales,read_locations,read_marketing_integrated_campaigns,read_marketing_events,read_markets,read_markets_home,read_merchant_managed_fulfillment_orders,read_metaobject_definitions,read_metaobjects,read_online_store_navigation,read_online_store_pages,read_order_edits,read_orders,read_packing_slip_templates,read_payment_mandate,read_payment_terms,read_payment_customizations,read_privacy_settings,read_product_feeds,read_product_listings,read_products,read_publications,read_purchase_options,read_reports,read_resource_feedbacks,read_returns,read_script_tags,read_shopify_payments_provider_accounts_sensitive,read_shipping,read_shopify_payments_accounts,read_shopify_payments_payouts,read_shopify_payments_bank_accounts,read_shopify_payments_disputes,read_content,read_store_credit_account_transactions,read_store_credit_accounts,read_own_subscription_contracts,read_themes,read_third_party_fulfillment_orders,read_translations,read_pixels,customer_read_companies,customer_read_customers,customer_read_draft_orders,customer_read_markets,customer_read_metaobjects,customer_read_orders,customer_read_quick_sale,customer_read_store_credit_account_transactions,customer_read_store_credit_accounts,customer_read_own_subscription_contracts,unauthenticated_read_bulk_operations,unauthenticated_read_checkouts,unauthenticated_read_customers,unauthenticated_read_customer_tags,unauthenticated_read_metaobjects,unauthenticated_read_product_pickup_locations,unauthenticated_read_product_inventory,unauthenticated_read_product_listings,unauthenticated_read_product_tags,unauthenticated_read_selling_plans,unauthenticated_read_shop_pay_installments_pricing,unauthenticated_read_content"
+scopes = "unauthenticated_read_product_listings,read_products,read_orders,read_customers,read_content,read_themes,read_locales,read_shipping,read_markets,customer_read_customers,customer_read_orders,customer_read_store_credit_account_transactions,customer_read_store_credit_accounts"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 

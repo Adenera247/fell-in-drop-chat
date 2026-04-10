@@ -8,6 +8,8 @@ import AppConfig from "../services/config.server";
 import { createSseStream } from "../services/streaming.server";
 import { createClaudeService } from "../services/claude.server";
 import { createToolService } from "../services/tool.server";
+import { getShopKnowledge } from "../services/shop-knowledge.server";
+import { resolveShopForRequest, enforceConversationShop } from "../services/shop-identity.server";
 
 
 /**
@@ -152,11 +154,40 @@ async function handleChatSession({
   const claudeService = createClaudeService(apiKey);
   const toolService = createToolService();
 
-  // Initialize MCP client
-  // Use storeDomain from theme settings if provided, otherwise fall back to Origin header
+  // Resolve the authoritative shop for this request — single source of
+  // truth for isolation. See services/shop-identity.server.js.
   const shopId = request.headers.get("X-Shopify-Shop-Id");
-  const rawStoreDomain = storeDomain || request.headers.get("Origin");
-  const shopDomain = rawStoreDomain?.startsWith('http') ? rawStoreDomain : `https://${rawStoreDomain}`;
+  const origin = request.headers.get("Origin");
+  const resolved = await resolveShopForRequest({ origin, storeDomain });
+
+  if (!resolved) {
+    stream.sendMessage({
+      type: "error",
+      error: "Unable to identify the shop for this request.",
+    });
+    return;
+  }
+
+  const shopHostname = resolved.host;
+
+  // Enforce conversation ↔ shop binding. If an existing conversation is
+  // reused from a different shop, reject the request.
+  try {
+    await enforceConversationShop(conversationId, shopHostname);
+  } catch (err) {
+    if (err.code === "SHOP_MISMATCH") {
+      console.warn(`[chat] rejecting ${conversationId}: ${err.message}`);
+      stream.sendMessage({
+        type: "error",
+        error: "This conversation belongs to a different shop.",
+      });
+      return;
+    }
+    throw err;
+  }
+
+  // Use the resolved host for MCP/storefront URL — never trust body-only values.
+  const shopDomain = `https://${shopHostname}`;
   const { mcpApiUrl } = await getCustomerAccountUrls(shopDomain, conversationId);
 
   console.log(`MCP connecting to store: ${shopDomain} (shopId: ${shopId})`);
@@ -192,8 +223,17 @@ async function handleChatSession({
     // Save user message to the database
     await saveMessage(conversationId, 'user', userMessage);
 
-    // Fetch all messages from the database for this conversation
-    const dbMessages = await getConversationHistory(conversationId);
+    // Fetch conversation history and shop knowledge in parallel
+    const [dbMessages, shopKnowledge] = await Promise.all([
+      getConversationHistory(conversationId),
+      shopHostname ? getShopKnowledge(shopHostname) : Promise.resolve(null),
+    ]);
+
+    if (shopKnowledge) {
+      console.log(`[chat] loaded shop knowledge for ${shopHostname} (${shopKnowledge.productCount ?? 0} products)`);
+    } else if (shopHostname) {
+      console.log(`[chat] no shop knowledge yet for ${shopHostname} — fallback to MCP tools only`);
+    }
 
     // Format messages for Claude API
     conversationHistory = dbMessages.map(dbMessage => {
@@ -217,7 +257,8 @@ async function handleChatSession({
         {
           messages: conversationHistory,
           promptType,
-          tools: mcpClient.tools
+          tools: mcpClient.tools,
+          shopKnowledge,
         },
         {
           // Handle text chunks

@@ -55,9 +55,12 @@ model CodeVerifier {
 
 model Conversation {
   id        String    @id
+  shopHost  String?                     // normalized host of the shop that owns this conversation
   messages  Message[]
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
+
+  @@index([shopHost])
 }
 
 model Message {
@@ -79,4 +82,22 @@ model CustomerAccountUrls {
   tokenUrl         String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+}
+
+// Tracks shop knowledge base sync state and holds a compact local mirror
+// of the knowledge JSON for fast read from the public /chat route (which
+// does not have an authenticated admin client). Source of truth lives in
+// the shop metafield $app:claude_chat_bot.knowledge_base — auto-cleaned
+// by Shopify on uninstall.
+model ShopSyncState {
+  shop          String   @id                 // myshopify domain (e.g. foo.myshopify.com)
+  primaryHost   String?  @unique             // public storefront host (e.g. foo.com) — used for chat lookups
+  lastSyncedAt  DateTime @default(now())
+  syncStatus    String   @default("pending") // "pending" | "syncing" | "success" | "failed"
+  syncError     String?
+  knowledgeSize Int?
+  productCount  Int?
+  knowledgeJson String?                      // compact JSON mirror for public chat route
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }

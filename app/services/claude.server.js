@@ -5,55 +5,91 @@
 import { Anthropic } from "@anthropic-ai/sdk";
 import AppConfig from "./config.server";
 import systemPrompts from "../prompts/prompts.json";
-import fs from "fs";
-import path from "path";
 
 /**
- * Loads all context files from context/ directory
- * Returns an object with boutiqueContext and productsContext strings
+ * Renders a shop knowledge object (as produced by shop-sync.server.js) into
+ * a compact, human-readable markdown block for injection into the system prompt.
+ *
+ * Returns two strings: boutiqueContext (shop + policies) and productsContext (catalog).
  */
-function loadContextFiles() {
-  // Resolve context/ relative to project root (3 levels up from services/)
-  const projectRoot = path.resolve(process.cwd(), "..");
-  const contextDir = path.join(projectRoot, "context");
-
-  let boutiqueContext = "";
-  let productsContext = "";
-
-  // Load boutique.md
-  const boutiquePath = path.join(contextDir, "boutique.md");
-  if (fs.existsSync(boutiquePath)) {
-    boutiqueContext = fs.readFileSync(boutiquePath, "utf-8").trim();
-  }
-  if (!boutiqueContext) {
-    boutiqueContext = "(Aucune info boutique configuree)";
+function renderShopKnowledge(knowledge) {
+  if (!knowledge) {
+    return {
+      boutiqueContext:
+        "(Catalogue en cours de synchronisation — utilise search_shop_catalog pour toute question produit)",
+      productsContext:
+        "(Catalogue en cours de synchronisation — utilise search_shop_catalog pour toute question produit)",
+    };
   }
 
-  // Load faq-auto.md and append to boutique context
-  const faqAutoPath = path.join(contextDir, "faq-auto.md");
-  if (fs.existsSync(faqAutoPath)) {
-    const faqContent = fs.readFileSync(faqAutoPath, "utf-8").trim();
-    if (faqContent) {
-      boutiqueContext += "\n\n---\n## FAQ AUTO-GENEREE (questions recurrentes detectees)\n" + faqContent;
+  const shop = knowledge.shop || {};
+  const policies = knowledge.policies || {};
+  const pages = knowledge.pages || [];
+  const products = knowledge.products || [];
+
+  // --- Boutique context ---
+  const boutiqueLines = [];
+  boutiqueLines.push(`## Infos boutique`);
+  if (shop.name) boutiqueLines.push(`- **Nom** : ${shop.name}`);
+  if (shop.url) boutiqueLines.push(`- **URL** : ${shop.url}`);
+  if (shop.currency) boutiqueLines.push(`- **Devise** : ${shop.currency}`);
+  if (shop.country || shop.city)
+    boutiqueLines.push(`- **Localisation** : ${[shop.city, shop.country].filter(Boolean).join(", ")}`);
+  if (shop.timezone) boutiqueLines.push(`- **Fuseau** : ${shop.timezone}`);
+  if (Array.isArray(shop.shipsToCountries) && shop.shipsToCountries.length) {
+    const sample = shop.shipsToCountries.slice(0, 20).join(", ");
+    boutiqueLines.push(
+      `- **Livre vers** : ${sample}${shop.shipsToCountries.length > 20 ? ` (+${shop.shipsToCountries.length - 20} autres)` : ""}`
+    );
+  }
+
+  if (policies.shipping || policies.refund || policies.privacy || policies.terms) {
+    boutiqueLines.push("");
+    boutiqueLines.push(`## Politiques de la boutique`);
+    if (policies.shipping)
+      boutiqueLines.push(`### Livraison\n${policies.shipping}`);
+    if (policies.refund)
+      boutiqueLines.push(`### Retours / Remboursement\n${policies.refund}`);
+    if (policies.privacy)
+      boutiqueLines.push(`### Confidentialité\n${policies.privacy}`);
+    if (policies.terms)
+      boutiqueLines.push(`### CGU\n${policies.terms}`);
+  }
+
+  if (pages.length) {
+    boutiqueLines.push("");
+    boutiqueLines.push(`## Pages de la boutique`);
+    for (const p of pages) {
+      boutiqueLines.push(`### ${p.title}`);
+      if (p.body) boutiqueLines.push(p.body);
     }
   }
 
-  // Load all product files from context/produits/
-  const produitsDir = path.join(contextDir, "produits");
-  if (fs.existsSync(produitsDir)) {
-    const files = fs.readdirSync(produitsDir).filter(f => f.endsWith(".md"));
-    for (const file of files) {
-      const content = fs.readFileSync(path.join(produitsDir, file), "utf-8").trim();
-      if (content) {
-        productsContext += `\n\n---\n### ${file.replace(".md", "").replace(/-/g, " ").toUpperCase()}\n${content}`;
-      }
+  // --- Products context ---
+  const productLines = [];
+  productLines.push(`## Catalogue (${products.length} produits)`);
+  if (products.length === 0) {
+    productLines.push("(Aucun produit dans le catalogue pour le moment)");
+  } else {
+    for (const p of products) {
+      const price =
+        p.priceMin && p.priceMax && p.priceMin !== p.priceMax
+          ? `${p.priceMin}–${p.priceMax} ${p.currency || ""}`.trim()
+          : p.priceMin
+          ? `${p.priceMin} ${p.currency || ""}`.trim()
+          : "prix indisponible";
+      const parts = [`**${p.title}** — ${price}`];
+      if (p.productType) parts.push(`_${p.productType}_`);
+      if (p.url) parts.push(`[lien](${p.url})`);
+      productLines.push(`- ${parts.join(" · ")}`);
+      if (p.description) productLines.push(`  ${p.description}`);
     }
   }
-  if (!productsContext) {
-    productsContext = "(Aucune fiche produit configuree)";
-  }
 
-  return { boutiqueContext, productsContext };
+  return {
+    boutiqueContext: boutiqueLines.join("\n"),
+    productsContext: productLines.join("\n"),
+  };
 }
 
 /**
@@ -71,19 +107,18 @@ export function createClaudeService(apiKey = process.env.CLAUDE_API_KEY) {
    * @param {Array} params.messages - Conversation history
    * @param {string} params.promptType - The type of system prompt to use
    * @param {Array} params.tools - Available tools for Claude
+   * @param {Object} params.shopKnowledge - Optional shop knowledge base to inject
    * @param {Object} streamHandlers - Stream event handlers
-   * @param {Function} streamHandlers.onText - Handles text chunks
-   * @param {Function} streamHandlers.onMessage - Handles complete messages
-   * @param {Function} streamHandlers.onToolUse - Handles tool use requests
    * @returns {Promise<Object>} The final message
    */
   const streamConversation = async ({
     messages,
     promptType = AppConfig.api.defaultPromptType,
-    tools
+    tools,
+    shopKnowledge = null,
   }, streamHandlers) => {
     // Get system prompt from configuration or use default
-    const systemInstruction = getSystemPrompt(promptType);
+    const systemInstruction = getSystemPrompt(promptType, shopKnowledge);
 
     // Create stream
     const stream = await anthropic.messages.stream({
@@ -123,18 +158,19 @@ export function createClaudeService(apiKey = process.env.CLAUDE_API_KEY) {
   };
 
   /**
-   * Gets the system prompt content for a given prompt type
-   * Injects dynamic context from context/ files for savAgent prompt
+   * Gets the system prompt content for a given prompt type.
+   * Injects the shop knowledge base into {{BOUTIQUE_CONTEXT}} / {{PRODUCTS_CONTEXT}}
+   * placeholders if present in the prompt template.
    * @param {string} promptType - The prompt type to retrieve
+   * @param {Object} shopKnowledge - Optional knowledge base object
    * @returns {string} The system prompt content
    */
-  const getSystemPrompt = (promptType) => {
+  const getSystemPrompt = (promptType, shopKnowledge = null) => {
     let prompt = systemPrompts.systemPrompts[promptType]?.content ||
       systemPrompts.systemPrompts[AppConfig.api.defaultPromptType].content;
 
-    // Inject dynamic context if prompt contains placeholders
     if (prompt.includes("{{BOUTIQUE_CONTEXT}}") || prompt.includes("{{PRODUCTS_CONTEXT}}")) {
-      const { boutiqueContext, productsContext } = loadContextFiles();
+      const { boutiqueContext, productsContext } = renderShopKnowledge(shopKnowledge);
       prompt = prompt.replace("{{BOUTIQUE_CONTEXT}}", boutiqueContext);
       prompt = prompt.replace("{{PRODUCTS_CONTEXT}}", productsContext);
     }
