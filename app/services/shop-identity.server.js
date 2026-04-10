@@ -69,18 +69,21 @@ export async function resolveShopForRequest({ origin, storeDomain }) {
   }
 
   for (const host of candidates) {
-    // Try primaryHost match first (public domain like zenovyra.com)
+    // Try primaryHost match first (public domain like zenovyra.com).
+    // Soft-deleted shops are excluded: an uninstalled merchant should not
+    // have their chat continue to serve customers.
     let state = await prisma.shopSyncState.findUnique({ where: { primaryHost: host } });
-    if (state) return { host, state };
+    if (state && !state.deletedAt) return { host, state };
 
     // Then try the myshopify shop domain (e.g. mystore.myshopify.com)
     state = await prisma.shopSyncState.findUnique({ where: { shop: host } });
-    if (state) return { host, state };
+    if (state && !state.deletedAt) return { host, state };
   }
 
-  // No ShopSyncState yet (merchant hasn't opened the embed), but we still
-  // need to return a shop host so we can tag the conversation. Use the
-  // first candidate (Origin) as the authoritative host.
+  // No (active) ShopSyncState — merchant hasn't opened the embed yet, or
+  // the shop is soft-deleted. We still need to return a shop host so we
+  // can tag the conversation. Use the first candidate (Origin) as the
+  // authoritative host.
   return { host: candidates[0], state: null };
 }
 
@@ -99,7 +102,7 @@ export async function enforceConversationShop(conversationId, shopHost) {
 
   const existing = await prisma.conversation.findUnique({
     where: { id: conversationId },
-    select: { shopHost: true },
+    select: { shopHost: true, deletedAt: true },
   });
 
   if (!existing) {
@@ -107,9 +110,20 @@ export async function enforceConversationShop(conversationId, shopHost) {
     await prisma.conversation.upsert({
       where: { id: conversationId },
       create: { id: conversationId, shopHost },
-      update: { shopHost },
+      update: { shopHost, deletedAt: null },
     });
     return;
+  }
+
+  // Refuse to reuse a soft-deleted conversation — otherwise a leaked
+  // conversation_id could be "revived" after an uninstall, bypassing the
+  // merchant's intent. Treat it like a foreign conversation.
+  if (existing.deletedAt) {
+    const err = new Error(
+      `Conversation ${conversationId} is soft-deleted, rejecting reuse from ${shopHost}`
+    );
+    err.code = "SHOP_MISMATCH";
+    throw err;
   }
 
   if (!existing.shopHost) {

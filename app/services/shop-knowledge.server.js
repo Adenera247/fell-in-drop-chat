@@ -69,10 +69,13 @@ export async function getShopKnowledge(hostOrShop) {
   try {
     // Strict: check primaryHost first, then the myshopify shop domain.
     // Both fields are unique (primaryHost via @unique, shop via @id), so
-    // each call returns at most ONE row.
+    // each call returns at most ONE row. Soft-deleted rows are excluded —
+    // we never serve a knowledge base for a shop that has uninstalled.
     let state = await prisma.shopSyncState.findUnique({ where: { primaryHost: key } });
+    if (state && state.deletedAt) state = null;
     if (!state) {
       state = await prisma.shopSyncState.findUnique({ where: { shop: key } });
+      if (state && state.deletedAt) state = null;
     }
 
     if (!state?.knowledgeJson) {

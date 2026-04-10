@@ -484,6 +484,15 @@ async function writeMetafield(admin, shopId, json) {
  * @param {string} shop - Shop domain (e.g. mystore.myshopify.com)
  */
 export async function syncShopKnowledge(admin, shop) {
+  // Refuse to sync a soft-deleted shop — this protects against stale
+  // callers (e.g. a webhook arriving after uninstall but before soft-delete
+  // was applied, or a caller that bypasses maybeSyncShopKnowledge).
+  const existing = await prisma.shopSyncState.findUnique({ where: { shop } });
+  if (existing?.deletedAt) {
+    console.log(`[shop-sync] ${shop}: skipped — soft-deleted, awaiting restore or purge`);
+    return { ok: false, reason: "soft_deleted" };
+  }
+
   await prisma.shopSyncState.upsert({
     where: { shop },
     create: { shop, syncStatus: "syncing" },
@@ -573,10 +582,12 @@ export async function syncShopKnowledge(admin, shop) {
 }
 
 /**
- * Debounced trigger: skips if a sync is already running or was run in the last 30s.
+ * Debounced trigger: skips if a sync is already running, was run in the last 30s,
+ * or if the shop has been soft-deleted (merchant uninstalled the app).
  */
 export async function maybeSyncShopKnowledge(admin, shop, { maxAgeMs = 30_000 } = {}) {
   const state = await prisma.shopSyncState.findUnique({ where: { shop } });
+  if (state?.deletedAt) return { skipped: true, reason: "soft_deleted" };
   if (state?.syncStatus === "syncing") return { skipped: true, reason: "in_progress" };
   if (
     state?.syncStatus === "success" &&

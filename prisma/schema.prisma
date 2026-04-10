@@ -56,11 +56,14 @@ model CodeVerifier {
 model Conversation {
   id        String    @id
   shopHost  String?                     // normalized host of the shop that owns this conversation
+  deletedAt DateTime?                   // soft-delete: set on uninstall, hard-deleted after 30 days
   messages  Message[]
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
   @@index([shopHost])
+  @@index([shopHost, deletedAt])
+  @@index([deletedAt])
 }
 
 model Message {
@@ -93,14 +96,17 @@ model CustomerAccountUrls {
 // the shop metafield $app:claude_chat_bot.knowledge_base — auto-cleaned
 // by Shopify on uninstall.
 model ShopSyncState {
-  shop          String   @id                 // myshopify domain (e.g. foo.myshopify.com)
-  primaryHost   String?  @unique             // public storefront host (e.g. foo.com) — used for chat lookups
-  lastSyncedAt  DateTime @default(now())
-  syncStatus    String   @default("pending") // "pending" | "syncing" | "success" | "failed"
+  shop          String    @id                 // myshopify domain (e.g. foo.myshopify.com)
+  primaryHost   String?   @unique             // public storefront host (e.g. foo.com) — used for chat lookups
+  deletedAt     DateTime?                     // soft-delete: set on uninstall, hard-deleted after 30 days
+  lastSyncedAt  DateTime  @default(now())
+  syncStatus    String    @default("pending") // "pending" | "syncing" | "success" | "failed"
   syncError     String?
   knowledgeSize Int?
   productCount  Int?
-  knowledgeJson String?                      // compact JSON mirror for public chat route
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  knowledgeJson String?                       // compact JSON mirror for public chat route
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([deletedAt])
 }

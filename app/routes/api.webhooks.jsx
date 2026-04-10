@@ -2,6 +2,7 @@ import { authenticate, unauthenticated } from "../shopify.server";
 import db from "../db.server";
 import { maybeSyncShopKnowledge } from "../services/shop-sync.server";
 import { invalidateShopKnowledge } from "../services/shop-knowledge.server";
+import { softDeleteShopData, RETENTION_DAYS } from "../services/data-retention.server";
 
 async function triggerResync(shop) {
   try {
@@ -20,15 +21,56 @@ export const action = async ({ request }) => {
   console.log(`Received ${topic} webhook for ${shop}`);
 
   switch (topic) {
-    case "APP_UNINSTALLED":
+    case "APP_UNINSTALLED": {
+      // Security-sensitive data is ALWAYS hard-deleted immediately — OAuth
+      // tokens cannot (and should not) be recovered on reinstall.
       if (session) {
         await db.session.deleteMany({ where: { shop } });
       }
-      // The shop metafield is auto-deleted by Shopify on uninstall. We just
-      // clean up the local mirror and sync state.
-      await db.shopSyncState.deleteMany({ where: { shop } }).catch(() => {});
+      // CustomerToken rows are linked to conversations, not shop, so they
+      // would linger. We clean them up along with the session: find all
+      // conversations belonging to this shop and wipe their customer tokens.
+      // (Note: we do this BEFORE soft-deleting the conversations so we can
+      // still query them.)
+      try {
+        const state = await db.shopSyncState.findUnique({ where: { shop } });
+        const primaryHost = state?.primaryHost;
+        if (primaryHost) {
+          const conversationIds = await db.conversation
+            .findMany({
+              where: { shopHost: primaryHost },
+              select: { id: true },
+            })
+            .then((rows) => rows.map((r) => r.id));
+          if (conversationIds.length) {
+            await db.customerToken.deleteMany({
+              where: { conversationId: { in: conversationIds } },
+            });
+            await db.customerAccountUrls.deleteMany({
+              where: { conversationId: { in: conversationIds } },
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`[webhooks] ${shop}: customer-token cleanup failed:`, err.message);
+      }
+
+      // Recoverable data is soft-deleted. The shop metafield on Shopify is
+      // auto-deleted by Shopify, but our local mirror + conversations are
+      // preserved for RETENTION_DAYS so the merchant can reinstall and
+      // restore everything without re-config.
+      try {
+        const counts = await softDeleteShopData(shop);
+        console.log(
+          `[webhooks] ${shop}: soft-deleted ${counts.syncState} ShopSyncState + ${counts.conversations} conversations (recoverable ${RETENTION_DAYS}d)`
+        );
+      } catch (err) {
+        console.error(`[webhooks] ${shop}: soft-delete failed:`, err.message);
+      }
+
       invalidateShopKnowledge(shop);
       break;
+    }
 
     case "PRODUCTS_CREATE":
     case "PRODUCTS_UPDATE":

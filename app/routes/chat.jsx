@@ -10,6 +10,7 @@ import { createClaudeService } from "../services/claude.server";
 import { createToolService } from "../services/tool.server";
 import { getShopKnowledge } from "../services/shop-knowledge.server";
 import { resolveShopForRequest, enforceConversationShop } from "../services/shop-identity.server";
+import { getLocalTools, isLocalTool, callLocalTool } from "../services/local-tools.server";
 
 // Regex matching phrases where the bot admits it can't help and defers to
 // the human team — used to flag the message as "fallback" for analytics.
@@ -201,6 +202,10 @@ async function handleChatSession({
   }
 
   const shopHostname = resolved.host;
+  // The myshopify domain (e.g. foo.myshopify.com) is what unauthenticated.admin()
+  // uses to look up the stored offline token. It's only available if the
+  // merchant has installed the app (ShopSyncState row exists).
+  const myshopifyDomain = resolved.state?.shop || null;
 
   // Enforce conversation ↔ shop binding. If an existing conversation is
   // reused from a different shop, reject the request.
@@ -281,6 +286,12 @@ async function handleChatSession({
       };
     });
 
+    // Merge MCP tools with local tools. Local tools only become available
+    // if we have a myshopify domain (i.e. the merchant installed the app),
+    // because they rely on the stored offline admin token.
+    const localTools = myshopifyDomain ? getLocalTools() : [];
+    const allTools = [...(mcpClient.tools || []), ...localTools];
+
     // Execute the conversation stream
     let finalMessage = { role: 'user', content: userMessage };
 
@@ -289,7 +300,7 @@ async function handleChatSession({
         {
           messages: conversationHistory,
           promptType,
-          tools: mcpClient.tools,
+          tools: allTools,
           shopKnowledge,
         },
         {
@@ -342,8 +353,16 @@ async function handleChatSession({
               tool_use_message: toolUseMessage
             });
 
-            // Call the tool
-            const toolUseResponse = await mcpClient.callTool(toolName, toolArgs);
+            // Dispatch: local tool first (runs on our server with whitelisted
+            // output), otherwise fall through to the MCP client.
+            let toolUseResponse;
+            if (isLocalTool(toolName)) {
+              toolUseResponse = await callLocalTool(toolName, toolArgs, {
+                shop: myshopifyDomain,
+              });
+            } else {
+              toolUseResponse = await mcpClient.callTool(toolName, toolArgs);
+            }
 
             // Handle tool response based on success/error
             if (toolUseResponse.error) {
